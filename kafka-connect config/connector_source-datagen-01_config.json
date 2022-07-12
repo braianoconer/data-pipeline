@@ -1,0 +1,12 @@
+{
+  "name": "source-datagen-01",
+  "config": {
+    "connector.class": "io.confluent.kafka.connect.datagen.DatagenConnector",
+    "tasks.max": "1",
+    "key.converter": "org.apache.kafka.connect.storage.StringConverter",
+    "value.converter": "org.apache.kafka.connect.json.JsonConverter",
+    "kafka.topic": "ratings",
+    "max.interval": "750",
+    "quickstart": "ratings"
+  }
+}

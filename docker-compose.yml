@@ -1,0 +1,244 @@
+version: '3.8'
+
+volumes:
+  zookeeper_data:
+    driver: local
+  kafka_data:
+    driver: local
+  elastic_data:
+    driver: local
+  minio_data1:
+    driver: local
+  minio_data2:
+    driver: local
+
+networks:
+  pipeline:
+    driver: "bridge"
+
+services:
+
+  minio:
+    image: quay.io/minio/minio:latest
+    container_name: minio
+    command: server --console-address ":9001" http://minio/data{1...2}
+    ports:
+      - '9000:9000'
+      - '9001:9001'
+    expose:
+      - "9000"
+      - "9001"
+    # environment:
+    #   MINIO_ROOT_USER: minioadmin       093DrIkcXK8J3SC1
+    #   MINIO_ROOT_PASSWORD: minioadmin   CfjqeNxAtDLnUK8Fbhka8RwzfZTNlrf5
+    hostname: minio
+    volumes:
+      - minio_data1:/data1
+      - minio_data2:/data2
+    networks:
+      - pipeline
+
+
+  control-center:
+    image: confluentinc/cp-enterprise-control-center:6.0.0
+    hostname: control-center
+    container_name: kafka-connect-control-center
+    depends_on:
+      - kafka
+    ports:
+      - "9021:9021"
+    environment:
+      CONTROL_CENTER_BOOTSTRAP_SERVERS: 'kafka:29092'
+      CONTROL_CENTER_CONNECT_CLUSTER: 'kafka-connect-01:8083'
+      CONTROL_CENTER_REPLICATION_FACTOR: 1
+      CONTROL_CENTER_INTERNAL_TOPICS_PARTITIONS: 1
+      CONTROL_CENTER_MONITORING_INTERCEPTOR_TOPIC_PARTITIONS: 1
+      CONFLUENT_METRICS_TOPIC_REPLICATION: 1
+      PORT: 9021
+    networks:
+      - pipeline
+
+
+  kafka-connect-01:
+    # image: confluentinc/cp-kafka-connect:6.2.0
+    image: confluentinc/cp-kafka-connect-base:6.2.0
+    container_name: kafka-connect-01
+    depends_on:
+      - kafka
+      - schema-registry
+    # links:
+    #   - schema-registry
+    #   - kafka
+    #   - elasticsearch
+    ports:
+      - 8083:8083
+    environment:
+      CONNECT_BOOTSTRAP_SERVERS: "kafka:29092"
+      CONNECT_REST_ADVERTISED_HOST_NAME: "kafka-connect-01"
+      CONNECT_REST_PORT: 8083
+      CONNECT_GROUP_ID: kafka-connect-01
+      CONNECT_CONFIG_STORAGE_TOPIC: _kafka-connect-01-configs
+      CONNECT_OFFSET_STORAGE_TOPIC: _kafka-connect-01-offsets
+      CONNECT_STATUS_STORAGE_TOPIC: _kafka-connect-01-status
+      CONNECT_KEY_CONVERTER: io.confluent.connect.avro.AvroConverter
+      CONNECT_KEY_CONVERTER_SCHEMA_REGISTRY_URL: 'http://schema-registry:8081'
+      CONNECT_VALUE_CONVERTER: io.confluent.connect.avro.AvroConverter
+      CONNECT_VALUE_CONVERTER_SCHEMA_REGISTRY_URL: 'http://schema-registry:8081'
+      CONNECT_LOG4J_ROOT_LOGLEVEL: "INFO"
+      CONNECT_LOG4J_LOGGERS: "org.apache.kafka.connect.runtime.rest=WARN,org.reflections=ERROR"
+      CONNECT_LOG4J_APPENDER_STDOUT_LAYOUT_CONVERSIONPATTERN: "[%d] %p %X{connector.context}%m (%c:%L)%n"
+      CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR: "1"
+      CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR: "1"
+      CONNECT_STATUS_STORAGE_REPLICATION_FACTOR: "1"
+      # If you want to use the Confluent Hub installer to d/l component, but make them available
+      # when running this offline, spin up the stack once and then run : 
+        #   docker cp kafka-connect-01:/usr/share/confluent-hub-components ./connectors
+        #   mv ./connectors/confluent-hub-components/* ./connectors
+        #   rm -rf ./connectors/confluent-hub-components
+        #CONNECT_PLUGIN_PATH: '/usr/share/java,/usr/share/confluent-hub-components/,/connectors/'
+    #volumes:
+    #  - $PWD/connectors:/connectors
+    # In the command section, $ are replaced with $$ to avoid the error 'Invalid interpolation format for "command" option'
+    command: 
+      - bash 
+      - -c 
+      - |
+        #
+        echo "Installing connector plugins"
+        confluent-hub install --no-prompt confluentinc/kafka-connect-datagen:0.5.0
+        confluent-hub install --no-prompt confluentinc/kafka-connect-elasticsearch:11.1.1
+        confluent-hub install --no-prompt confluentinc/kafka-connect-s3-source:2.2.0
+        #
+        echo "Launching Kafka Connect worker"
+        /etc/confluent/docker/run & 
+        #
+        echo "Waiting for Kafka Connect to start listening on localhost ⏳"
+        while : ; do
+          curl_status=$$(curl -s -o /dev/null -w %{http_code} http://localhost:8083/connectors)
+          echo -e $$(date) " Kafka Connect listener HTTP state: " $$curl_status " (waiting for 200)"
+          if [ $$curl_status -eq 200 ] ; then
+            break
+          fi
+          sleep 5 
+        done
+        # echo -e "\n--\n+> Creating Data Generator source"
+        # curl -s -X PUT -H  "Content-Type:application/json" http://localhost:8083/connectors/source-datagen-01/config \
+        #     -d '{
+        #     "connector.class": "io.confluent.kafka.connect.datagen.DatagenConnector",
+        #     "key.converter": "org.apache.kafka.connect.storage.StringConverter",
+        #     "value.converter": "org.apache.kafka.connect.json.JsonConverter",
+        #     "kafka.topic": "ratings",
+        #     "max.interval":750,
+        #     "quickstart": "ratings",
+        #     "tasks.max": 1
+        # }'
+        sleep infinity
+
+    networks:
+      - pipeline
+
+
+  zookeeper:
+    image: bitnami/zookeeper:3
+    container_name: zookeeper
+    ports:
+      - '2181:2181'
+    volumes:
+      - 'zookeeper_data:/bitnami'
+    environment:
+      - ALLOW_ANONYMOUS_LOGIN=yes
+    networks:
+      - pipeline
+
+
+  kafka:
+    image: bitnami/kafka:2
+    container_name: kafka
+    ports:
+      - '9092:9092'
+      - '29092:29092'
+    volumes:
+      - 'kafka_data:/bitnami'
+    environment:
+      - KAFKA_CREATE_TOPICS="requests:1:1,responses:1:1,notifications:1:1"
+      #- KAFKA_AUTO_CREATE_TOPICS_ENABLE=false
+      - KAFKA_CFG_ZOOKEEPER_CONNECT=zookeeper:2181
+      - ALLOW_PLAINTEXT_LISTENER=yes
+      - KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP=PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      - KAFKA_CFG_LISTENERS=PLAINTEXT://:29092,PLAINTEXT_HOST://:9092
+      - KAFKA_CFG_ADVERTISED_LISTENERS=PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+    depends_on:
+      - zookeeper
+    networks:
+      - pipeline
+
+
+  schema-registry:
+    image: "confluentinc/cp-schema-registry:5.5.0"
+    container_name: schema-registry
+    ports:
+      - "8081:8081"
+    environment:
+      SCHEMA_REGISTRY_HOST_NAME: schema-registry
+      SCHEMA_REGISTRY_KAFKASTORE_CONNECTION_URL: 'zookeeper:2181'
+      SCHEMA_REGISTRY_ACCESS_CONTROL_ALLOW_ORIGIN: '*'
+      SCHEMA_REGISTRY_ACCESS_CONTROL_ALLOW_METHODS: 'GET,POST,PUT,OPTIONS'
+    depends_on:
+      - zookeeper
+      - kafka
+    networks:
+      - pipeline
+
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:7.8.0
+    container_name: elasticsearch
+    ports:
+      - '9200:9200'
+    environment:
+      - node.name=elasticsearch
+      - cluster.name=es-docker-cluster
+      - cluster.initial_master_nodes=elasticsearch
+      - bootstrap.memory_lock=true
+      - 'ES_JAVA_OPTS=-Xms512m -Xmx512m'
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    volumes:
+      - elastic_data:/usr/share/elasticsearch/data:rw
+    networks:
+      - pipeline
+
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:7.8.0
+    container_name: kibana
+    ports:
+      - '5601:5601'
+    environment:
+      ELASTICSEARCH_URL: http://elasticsearch:9200
+      ELASTICSEARCH_HOSTS: http://elasticsearch:9200
+    restart: on-failure
+    depends_on:
+      - elasticsearch
+    networks:
+      - pipeline
+
+
+  kcat:
+    image: edenhill/kcat:1.7.1
+    container_name: kcat
+    entrypoint: 
+      - /bin/sh 
+      - -c 
+      - |
+        apk add jq; 
+        while [ 1 -eq 1 ];do sleep 60;done
+
+    depends_on:
+      - kafka
+    volumes:
+      - ./events:/tmp/files
+    networks:
+      - pipeline
